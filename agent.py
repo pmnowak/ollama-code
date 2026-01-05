@@ -82,6 +82,28 @@ TOOLS = [
         }
     },
     {
+        "name": "edit_file",
+        "description": "Replace a specific block of text in a file with new content. This is preferred over write_file for large files.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path to the file to edit"
+                },
+                "old_content": {
+                    "type": "string",
+                    "description": "The exact block of text to be replaced"
+                },
+                "new_content": {
+                    "type": "string",
+                    "description": "The new text to insert instead"
+                }
+            },
+            "required": ["path", "old_content", "new_content"]
+        }
+    },
+    {
         "name": "list_directory",
         "description": "List files and directories at the given path. Use this to explore the project structure.",
         "parameters": {
@@ -172,6 +194,32 @@ def write_file(path: str, content: str) -> str:
         return f"Error: Permission denied: {path}"
     except Exception as e:
         return f"Error writing file: {str(e)}"
+    
+def edit_file(path: str, old_content: str, new_content: str) -> str:
+    try:
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            return f"Error: File not found: {path}"
+        
+        with open(path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+        
+        if old_content not in file_content:
+            return "Error: Could not find the exact 'old_content' in the file. Please make sure the search block matches exactly (including indentation and spaces)."
+        
+        # Prüfen, ob der Block mehrfach vorkommt
+        occurrences = file_content.count(old_content)
+        if occurrences > 1:
+            return f"Error: The 'old_content' block was found {occurrences} times. Please provide a more specific unique block to replace."
+        
+        new_file_content = file_content.replace(old_content, new_content)
+        
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(new_file_content)
+            
+        return f"Successfully edited {path}. Replaced unique occurrence of the specified block."
+    except Exception as e:
+        return f"Error editing file: {str(e)}"
 
 def list_directory(path: str = ".") -> str:
     try:
@@ -236,6 +284,12 @@ def execute_tool(tool_name: str, args: dict) -> tuple[str, bool]:
         return read_file(args.get("path", "")), False
     elif tool_name == "write_file":
         return write_file(args.get("path", ""), args.get("content", "")), False
+    elif tool_name == "edit_file":
+        return edit_file(
+            args.get("path", ""),
+            args.get("old_content", ""),
+            args.get("new_content", "")
+        ), False
     elif tool_name == "list_directory":
         return list_directory(args.get("path", ".")), False
     elif tool_name == "run_command":
@@ -270,6 +324,7 @@ def build_system_prompt() -> str:
 Current working directory: {cwd}
 
 You have access to these tools:
+- edit_file: Replace a unique block of text (Search & Replace)
 - read_file: Read file contents
 - write_file: Create or overwrite files
 - list_directory: List files in a directory
@@ -288,6 +343,8 @@ IMPORTANT INSTRUCTIONS:
 4. After receiving tool results, continue working or call task_complete when done.
 5. Always read relevant files before modifying them.
 6. For coding tasks, make sure to test your changes if possible.
+7. Use edit_file for small changes in large files instead of write_file. 
+8. When using edit_file, ensure the 'old_content' matches EXACTLY what is in the file.
 
 Example tool calls:
 ```tool
@@ -301,6 +358,16 @@ Example tool calls:
 ```tool
 {{"tool": "run_command", "args": {{"command": "python test.py"}}}}
 ```
+
+```tool
+{{
+  "tool": "edit_file", 
+  "args": {{
+    "path": "main.py",
+    "old_content": "def hello():\\n    print('hi')",
+    "new_content": "def hello():\\n    print('hello world')"
+  }}
+}}
 """
 
 def parse_tool_call(response: str) -> Optional[tuple[str, dict]]:
@@ -329,28 +396,33 @@ def parse_tool_call(response: str) -> Optional[tuple[str, dict]]:
     return None, None
 
 def chat_with_ollama(messages: list) -> str:
-    """Send messages to Ollama and get response"""
+    """Sendet Nachrichten an Ollama mit Streaming-Support"""
     try:
         response = requests.post(
             f"{OLLAMA_URL}/api/chat",
             json={
                 "model": MODEL,
                 "messages": messages,
-                "stream": False,
-                "options": {
-                    "num_ctx": MAX_CONTEXT_TOKENS
-                }
+                "stream": True,  # Streaming aktivieren
+                "options": {"num_ctx": MAX_CONTEXT_TOKENS}
             },
-            timeout=120
+            timeout=120,
+            stream=True
         )
         response.raise_for_status()
-        return response.json()["message"]["content"]
-    except requests.exceptions.ConnectionError:
-        print_colored(f"\n❌ Cannot connect to Ollama at {OLLAMA_URL}", Colors.RED)
-        print_colored("Make sure Ollama is running: ollama serve", Colors.YELLOW)
-        sys.exit(1)
+        
+        full_content = ""
+        for line in response.iter_lines():
+            if line:
+                chunk = json.loads(line)
+                if "message" in chunk and "content" in chunk["message"]:
+                    content = chunk["message"]["content"]
+                    full_content += content
+                    # Wir drucken den Content direkt aus (ohne Zeilenumbruch)
+                    print(content, end="", flush=True)
+        return full_content
     except Exception as e:
-        print_colored(f"\n❌ Error communicating with Ollama: {e}", Colors.RED)
+        print_colored(f"\n❌ Error: {e}", Colors.RED)
         sys.exit(1)
 
 def agent_loop(user_input: str, messages: list) -> list:
